@@ -33,6 +33,7 @@ from chronic_chatbot.config import (
     GOOGLE_CALENDAR_TOKEN_PATH,
 )
 from chronic_chatbot.state import AgentState
+from chronic_chatbot.utils import safe_llm_invoke, safe_content, strip_agent_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -335,26 +336,38 @@ Instruction: {instruction}
 
 
 def parse_action_instruction(instruction: str) -> dict:
+    _FALLBACK = {
+        "action_type": "calendar",
+        "doctor_name": "Doctor",
+        "doctor_email": "",
+        "appointment_date": "",
+        "appointment_reason": instruction,
+        "email_body": "",
+        "calendar_event_id": "",
+    }
     prompt = ACTION_PARSE_PROMPT.format(instruction=instruction)
-    response = llm.invoke([HumanMessage(content=prompt)])
-    raw = response.content.strip()
+    raw = safe_llm_invoke(
+        llm,
+        [HumanMessage(content=prompt)],
+        fallback=json.dumps(_FALLBACK),
+    )
     try:
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("Action parser returned non-JSON; using defaults")
-        return {
-            "action_type": "calendar",
-            "doctor_name": "Doctor",
-            "doctor_email": "",
-            "appointment_date": "",
-            "appointment_reason": instruction,
-            "email_body": "",
-            "calendar_event_id": "",
-        }
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```")[1]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+        # Find JSON block in case of extra text
+        brace_s = cleaned.find("{")
+        brace_e = cleaned.rfind("}")
+        if brace_s != -1 and brace_e > brace_s:
+            result = json.loads(cleaned[brace_s:brace_e+1])
+            if isinstance(result, dict):
+                return {**_FALLBACK, **result}   # merge so no key is ever missing
+    except (json.JSONDecodeError, ValueError):
+        pass
+    logger.warning("Action parser returned non-JSON; using defaults")
+    return _FALLBACK
 
 
 # ══════════════════════════════════════════════════════════════
@@ -370,11 +383,12 @@ def action_node(state: AgentState) -> dict:
     """
     logger.info("⚡ Action Agent activated")
 
-    instruction = state["messages"][-1].content
-    if "[Orchestrator → action]" in instruction:
-        instruction = instruction.split("]", 1)[-1].strip()
+    instruction = state["messages"][-1]
+    raw_content = safe_content(instruction, "") if not isinstance(instruction.content, str) \
+        else str(instruction.content)
+    instruction_text = strip_agent_prefix(raw_content, "action")
 
-    parsed           = parse_action_instruction(instruction)
+    parsed           = parse_action_instruction(instruction_text)
     action_type      = parsed.get("action_type", "calendar")
     doctor_name      = parsed.get("doctor_name", "Unknown Doctor")
     doctor_email     = parsed.get("doctor_email", "")

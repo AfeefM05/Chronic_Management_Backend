@@ -42,6 +42,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 from chronic_chatbot.config import LOG_LEVEL, SQLITE_DB_PATH
 from chronic_chatbot.graph import graph_app
+from chronic_chatbot.utils import safe_content
 # Calendar helpers — importable because action.py exports them as module-level fns
 from chronic_chatbot.agents.action import (
     create_calendar_event,
@@ -157,7 +158,7 @@ def health_check():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    logger.info(f"💬 New message from {request.user_id}: {request.message[:80]}…")
+    logger.info(f"💬 New message from {request.user_id}: {request.message[:80]}")
 
     session = SESSIONS.get(request.user_id, {
         "messages": [],
@@ -170,29 +171,68 @@ async def chat(request: ChatRequest):
     })
     session["messages"] = session["messages"] + [HumanMessage(content=request.message)]
 
+    # ── Run the agent graph ─────────────────────────────────────
+    error_reply: str | None = None
     try:
         result_state = graph_app.invoke(session)
     except Exception as e:
-        logger.error(f"Graph execution failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Agent error: {e}")
+        err_str = str(e)
+        logger.error(f"Graph execution error: {e}", exc_info=True)
+
+        # Keep the session so conversation history is preserved
+        result_state = session
+
+        # Map known error types to friendly messages
+        if "Network is unreachable" in err_str or "Errno 101" in err_str:
+            error_reply = (
+                "I'm having trouble reaching the internet right now. "
+                "Please check your connection and try again."
+            )
+        elif "bad character range" in err_str:
+            error_reply = (
+                "An internal routing error occurred. The team has been notified. "
+                "Please retry your message."
+            )
+        elif "gemini" in err_str.lower() or "model" in err_str.lower():
+            error_reply = (
+                "The AI model is temporarily unavailable. "
+                "Please try again in a few seconds."
+            )
+        else:
+            error_reply = (
+                "Something went wrong processing your request. "
+                "Please try again — your conversation history is preserved."
+            )
 
     SESSIONS[request.user_id] = result_state
 
+    # ── If error occurred, return the friendly message ──────────
+    if error_reply:
+        logger.warning(f"Returning error message to user: {error_reply[:60]}")
+        return ChatResponse(reply=error_reply)
+
+    # ── Extract the final AI reply ──────────────────────────────
+    DEFAULT_REPLY = (
+        "I processed your request but couldn't generate a text response. "
+        "Please try rephrasing your message."
+    )
     messages = result_state.get("messages", [])
-    final_reply = "I'm sorry, I couldn't generate a response."
+    final_reply = DEFAULT_REPLY
+
     for msg in reversed(messages):
-        if (
-            isinstance(msg, AIMessage)
-            and msg.content
-            and not msg.content.startswith("[")
-        ):
-            final_reply = msg.content
+        if not isinstance(msg, AIMessage):
+            continue
+        # safe_content handles both str and list-of-parts content
+        content_str = safe_content(msg, "").strip()
+        if content_str and not content_str.startswith("["):
+            final_reply = content_str
             break
 
-    if final_reply == "I'm sorry, I couldn't generate a response." and messages:
-        final_reply = messages[-1].content
+    # Last-resort: use whatever the last message says
+    if final_reply == DEFAULT_REPLY and messages:
+        final_reply = safe_content(messages[-1], DEFAULT_REPLY)
 
-    logger.info(f"✅ Reply generated for {request.user_id}: {final_reply[:80]}…")
+    logger.info(f"✅ Reply for {request.user_id}: {final_reply[:80]}")
     return ChatResponse(reply=final_reply)
 
 

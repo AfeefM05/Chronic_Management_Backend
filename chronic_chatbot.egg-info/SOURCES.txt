@@ -16,3 +16,4 @@ chronic_chatbot/agents/memory.py
 chronic_chatbot/agents/orchestrator.py
 tests/__init__.py
 tests/test_graph.py
+tests/validate_apis.py

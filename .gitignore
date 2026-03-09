@@ -1,0 +1,11 @@
+venv/
+.env
+*.pyc
+__pycache__/
+data/
+credentials/
+*.db
+*.sqlite
+.DS_Store
+.pytest_cache/
+.chroma/

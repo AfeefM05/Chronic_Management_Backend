@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────────────────────
 # Chronic Disease Chatbot – Dependency Manifest
-# Architecture: LangGraph + Gemini + Tavily + ChromaDB + SQLite
+# Architecture: LangGraph + MCP + Gemini + Tavily + ChromaDB + SQLite
 # ─────────────────────────────────────────────────────────────
 
 # ── Core Orchestration ────────────────────────────────────────
@@ -13,16 +13,20 @@ langchain-google-genai>=1.0.0      # Gemini Pro / Flash
 # ── LLM Provider ─────────────────────────────────────────────
 google-generativeai>=0.7.0         # Underlying Gemini SDK
 
-# ── Web Search (Knowledge Agent) ─────────────────────────────
+# ── MCP (Model Context Protocol) ─────────────────────────────
+mcp>=1.0.0                         # FastMCP server framework (mcp.server.fastmcp)
+langchain-mcp-adapters>=0.2.0      # MultiServerMCPClient + get_tools() bridge
+
+# ── Web Search (Knowledge Agent via MCP) ─────────────────────
 tavily-python>=0.3.0               # Tavily Search API – LLM-optimised results
 
-# ── Vector Memory (Memory Agent) ─────────────────────────────
-chromadb>=0.5.0                    # Local vector store (includes ONNX-based default embeddings)
+# ── Vector Memory (Memory Agent via MCP) ─────────────────────
+chromadb>=1.0.0                    # Local vector store (Rust-backed in 1.x)
 
-# ── Structured DB (Memory Agent) ─────────────────────────────
+# ── Structured DB (Memory Agent via MCP) ─────────────────────
 # sqlite3 is part of Python stdlib – no install needed
 
-# ── Action Tools ─────────────────────────────────────────────
+# ── Action Tools (Calendar + Email via MCP) ───────────────────
 google-api-python-client>=2.130.0  # Google Calendar API
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.2.0

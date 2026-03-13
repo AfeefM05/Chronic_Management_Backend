@@ -16,8 +16,9 @@ a soft graceful fallback — never propagates exceptions upward.
 import logging
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
-
-from chronic_chatbot.config import GOOGLE_API_KEY, SUBAGENT_MODEL, TAVILY_API_KEY
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
+from chronic_chatbot.config import GOOGLE_API_KEY, SUBAGENT_MODEL
 from chronic_chatbot.state import AgentState
 from chronic_chatbot.utils import safe_content, safe_llm_invoke, strip_agent_prefix
 
@@ -29,20 +30,6 @@ llm = ChatGoogleGenerativeAI(
     google_api_key=GOOGLE_API_KEY,
     temperature=0.1,
 )
-
-# Tavily client — lazy-initialised so import errors don't crash startup
-_tavily = None
-
-def _get_tavily():
-    global _tavily
-    if _tavily is None:
-        try:
-            from tavily import TavilyClient
-            _tavily = TavilyClient(api_key=TAVILY_API_KEY)
-        except Exception as e:
-            logger.error(f"Tavily init failed: {e}")
-    return _tavily
-
 
 KNOWLEDGE_SYSTEM_PROMPT = """
 You are a medical research assistant. You have been given raw web search results.
@@ -58,45 +45,7 @@ and add the disclaimer. Do not say you cannot help.
 Output plain text only (no markdown headers, no JSON).
 """.strip()
 
-
-def _tavily_search(query: str) -> str:
-    """
-    Run a Tavily search and return a raw context string.
-    Returns an empty string on any error (caller handles fallback).
-    """
-    client = _get_tavily()
-    if client is None:
-        return ""
-    try:
-        resp = client.search(
-            query=query,
-            search_depth="advanced",
-            max_results=4,
-            include_answer=True,
-        )
-        # Normalise: newer SDK returns object, older returns dict
-        if isinstance(resp, dict):
-            answer  = resp.get("answer") or ""
-            results = resp.get("results") or []
-        else:
-            answer  = getattr(resp, "answer",  None) or ""
-            results = getattr(resp, "results", None) or []
-
-        parts = [str(answer)] if answer else []
-        for r in results[:4]:
-            if isinstance(r, dict):
-                parts.append(f"Source: {r.get('url','')}\n{r.get('content','')}")
-            else:
-                parts.append(f"Source: {getattr(r,'url','')}\n{getattr(r,'content','')}")
-
-        return "\n\n".join(parts)
-
-    except Exception as e:
-        logger.warning(f"Tavily search failed: {e}")
-        return ""
-
-
-def knowledge_node(state: AgentState) -> dict:
+async def knowledge_node(state: AgentState) -> dict:
     """LangGraph node – Knowledge Agent."""
     logger.info("🔍 Knowledge Agent activated")
 
@@ -111,12 +60,33 @@ def knowledge_node(state: AgentState) -> dict:
         query = "general chronic disease management advice"
 
     logger.info(f"🔍 Query: {query[:100]}")
+    
+    client = MultiServerMCPClient({
+        "knowledge_server": {
+            "command": "python",
+            "args": ["mcp_servers/knowledge_server.py"],
+            "transport": "stdio"
+        }
+    })
+    
+    raw_context = ""
 
-    # ── Web search (best-effort) ──────────────────────────────
-    raw_context = _tavily_search(query)
+    async with client.session("knowledge_server") as session:
+        # Load tools from the MCP server
+        mcp_tools = await load_mcp_tools(session)
+        
+        search_tool = next((t for t in mcp_tools if t.name == "tavily_search"), None)
+        
+        if search_tool:
+            raw_context = await search_tool.ainvoke({"query": query})
+            if hasattr(raw_context, "content"):
+                raw_context = raw_context.content
+        else:
+            logger.error("Search tool not found in MCP server")
 
+    # ── Construct Payload ────────────────────────────────────────
     if raw_context:
-        user_content = f"Search query: {query}\n\nRaw search results:\n{raw_context[:4000]}"
+        user_content = f"Search query: {query}\n\nRaw search results:\n{str(raw_context)[:4000]}"
     else:
         # No web results — ask LLM from general knowledge
         user_content = (

@@ -43,8 +43,8 @@ from langchain_core.messages import HumanMessage, AIMessage
 from chronic_chatbot.config import LOG_LEVEL, SQLITE_DB_PATH
 from chronic_chatbot.graph import graph_app
 from chronic_chatbot.utils import safe_content
-# Calendar helpers — importable because action.py exports them as module-level fns
-from chronic_chatbot.agents.action import (
+# Calendar helpers live in the MCP server module (action.py is now just the agent client)
+from chronic_chatbot.mcp_server.action_server import (
     create_calendar_event,
     update_calendar_event,
     delete_calendar_event,
@@ -174,7 +174,7 @@ async def chat(request: ChatRequest):
     # ── Run the agent graph ─────────────────────────────────────
     error_reply: str | None = None
     try:
-        result_state = graph_app.invoke(session)
+        result_state = await graph_app.ainvoke(session)
     except Exception as e:
         err_str = str(e)
         logger.error(f"Graph execution error: {e}", exc_info=True)
